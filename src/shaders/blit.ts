@@ -1,6 +1,6 @@
 import type { Config } from "../config";
 
-export function get_shader_blit(config: Config): string {
+export function get_shader_blit(_config: Config): string {
   return /* wgsl */`
 @group(0) @binding(0) var<uniform> in_scene_info: SceneInfo;
 @group(0) @binding(1) var<uniform> in_time: f32;
