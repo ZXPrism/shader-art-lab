@@ -1,5 +1,6 @@
 import { blit_scene_entry } from "./blit";
 import type { SceneFactory } from "./scene";
+import { sdf_scene_entry } from "./sdf";
 
 export interface SceneEntry {
     id: string;
@@ -12,6 +13,7 @@ export interface SceneEntry {
 
 export const scene_entries: readonly SceneEntry[] = [
     blit_scene_entry,
+    sdf_scene_entry,
 ];
 
 const scene_entry_map = new Map<string, SceneEntry>();
