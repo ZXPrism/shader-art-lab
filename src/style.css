@@ -1,87 +1,260 @@
-html,
-body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
+:root {
+    color: #f4f4f5;
+    background: #0c0c0e;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
 }
 
-canvas {
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    min-width: 320px;
+    min-height: 100%;
+    margin: 0;
+}
+
+body {
+    min-height: 100vh;
+    background:
+        radial-gradient(circle at top, rgba(67, 56, 202, 0.12), transparent 36rem),
+        #0c0c0e;
+}
+
+a {
+    color: inherit;
+}
+
+button,
+input {
+    font: inherit;
+}
+
+.page {
+    width: min(1280px, calc(100% - 40px));
+    margin: 0 auto;
+    padding: 56px 0 72px;
+}
+
+.site-title {
+    margin: 0 0 36px;
+    font-size: clamp(2rem, 5vw, 3.5rem);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+}
+
+.scene-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 24px;
+}
+
+.scene-card {
+    min-width: 0;
+    overflow: hidden;
+    color: inherit;
+    text-decoration: none;
+    background: #17171a;
+    border: 1px solid #2b2b30;
+    border-radius: 12px;
+    transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.scene-card:hover,
+.scene-card:focus-visible {
+    border-color: #6366f1;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.32);
+    outline: none;
+    transform: translateY(-3px);
+}
+
+.scene-thumbnail {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    padding: 28px;
+    object-fit: contain;
+    background: #101012;
+    border-bottom: 1px solid #2b2b30;
+}
+
+.scene-card-body {
+    padding: 18px 20px 20px;
+}
+
+.scene-card-title {
+    margin: 0 0 8px;
+    overflow: hidden;
+    font-size: 1.1rem;
+    line-height: 1.3;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.scene-card-date,
+.scene-detail-date {
+    color: #a1a1aa;
+    font-size: 0.85rem;
+}
+
+.back-link {
+    display: inline-block;
+    margin-bottom: 28px;
+    color: #a5b4fc;
+    text-decoration: none;
+}
+
+.back-link:hover,
+.back-link:focus-visible {
+    color: #c7d2fe;
+    text-decoration: underline;
+}
+
+.scene-header {
+    max-width: 760px;
+    margin-bottom: 28px;
+}
+
+.scene-title {
+    margin: 0 0 8px;
+    font-size: clamp(2rem, 5vw, 3.25rem);
+    line-height: 1.05;
+    letter-spacing: -0.035em;
+}
+
+.scene-description {
+    margin: 16px 0 0;
+    color: #d4d4d8;
+    font-size: 1rem;
+    line-height: 1.7;
+}
+
+.scene-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 20px;
+    align-items: start;
+}
+
+.scene-canvas-container {
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    background: #000;
+    border: 1px solid #2b2b30;
+    border-radius: 12px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+.scene-canvas {
+    position: absolute;
+    inset: 0;
     display: block;
     width: 100%;
     height: 100%;
-    position: fixed;
-    left: 0;
-    top: 0;
-    background: black;
 }
 
-.tips-container {
-    position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 1000;
-    opacity: 0.5;
-    transition: opacity 0.3s ease;
-    pointer-events: none;
+.scene-config-panel {
+    min-height: 84px;
 }
 
-.tips-container:hover {
-    opacity: 1;
+.scene-config-container > div {
+    width: 100%;
 }
 
-.tips-container h3 {
+.config-empty {
     margin: 0;
-    padding: 10px 20px;
-    background: rgba(0, 0, 0, 0.7);
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: normal;
-    color: #fff;
-    text-align: center;
-    backdrop-filter: blur(10px);
+    padding: 18px;
+    color: #a1a1aa;
+    background: #17171a;
+    border: 1px solid #2b2b30;
+    border-radius: 10px;
+    font-size: 0.9rem;
+}
+
+.scene-error {
+    margin-top: 20px;
+    padding: 16px 18px;
+    color: #fecaca;
+    white-space: pre-wrap;
+    background: rgba(127, 29, 29, 0.35);
+    border: 1px solid #ef4444;
+    border-radius: 10px;
+}
+
+.not-found-page h1 {
+    margin: 0 0 24px;
 }
 
 .error-display {
     position: fixed;
     top: 50%;
     left: 50%;
-    transform: translate(-50%, -50%);
-    max-width: 600px;
-    width: 90%;
-    background: rgba(20, 0, 0, 0.95);
-    border: 2px solid #ff4444;
-    border-radius: 12px;
-    padding: 20px;
     z-index: 10000;
-    box-shadow: 0 10px 40px rgba(255, 0, 0, 0.3);
+    width: min(600px, calc(100% - 40px));
+    max-height: calc(100vh - 40px);
+    overflow: auto;
+    padding: 20px;
+    color: #fecaca;
+    background: rgba(24, 3, 3, 0.97);
+    border: 2px solid #ef4444;
+    border-radius: 12px;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+    transform: translate(-50%, -50%);
 }
 
 .error-display h2 {
-    margin: 0 0 15px 0;
-    color: #ff4444;
-    font-size: 20px;
-    font-weight: bold;
+    margin: 0 0 15px;
+    color: #f87171;
+    font-size: 1.25rem;
 }
 
-.error-display .error-message {
-    color: #ffcccc;
-    font-family: monospace;
-    font-size: 14px;
+.error-message,
+.error-stack {
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
     white-space: pre-wrap;
-    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.error-message {
+    font-size: 0.9rem;
     line-height: 1.5;
 }
 
-.error-display .error-stack {
+.error-stack {
     margin-top: 15px;
     padding-top: 15px;
-    border-top: 1px solid #ff4444;
-    color: #ff9999;
-    font-family: monospace;
-    font-size: 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
+    color: #fca5a5;
+    border-top: 1px solid #ef4444;
+    font-size: 0.75rem;
+}
+
+@media (max-width: 840px) {
+    .scene-workspace {
+        grid-template-columns: 1fr;
+    }
+
+    .scene-config-panel {
+        min-height: 0;
+    }
+}
+
+@media (max-width: 540px) {
+    .page {
+        width: min(100% - 24px, 1280px);
+        padding: 32px 0 48px;
+    }
+
+    .site-title {
+        margin-bottom: 24px;
+    }
+
+    .scene-grid {
+        grid-template-columns: 1fr;
+        gap: 16px;
+    }
 }

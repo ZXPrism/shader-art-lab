@@ -1,184 +1,145 @@
-import { EventBus } from "./event_bus";
-import { ConfigManager } from "./config";
 import { vec3 } from "gl-matrix";
 import * as Tweakpane from "tweakpane";
 
-type WidgetType = "slider" | "int-slider" | "toggle" | "position" | "color";
+import type { ConfigFieldDef, ConfigValue, SceneConfig } from "./config";
 
-interface FieldDef {
-    key: string;
-    folder: string;
-    label: string;
-    widget: WidgetType;
-    min?: number;
-    max?: number;
-    step?: number;
-}
-
-/** Shape the params object uses for vec3-as-position bindings. */
 type Vec3Params = { x: number; y: number; z: number };
-/** Shape the params object uses for color-picker bindings. */
 type ColorParams = { r: number; g: number; b: number };
-/** All possible value types in the Tweakpane params object. */
 type ParamValue = number | boolean | Vec3Params | ColorParams;
-
-const FIELD_DEFS: FieldDef[] = [
-    // Camera ────────────────────────────────────────────────────────────────
-    { key: "camera_fov_y", folder: "Camera", label: "FOV Y", widget: "slider", min: 0, max: Math.PI },
-    { key: "camera_focal_length", folder: "Camera", label: "Focal Length", widget: "slider", min: 0.1, max: 10 },
-    { key: "camera_eye", folder: "Camera", label: "Eye Position", widget: "position", min: -10, max: 10 },
-    { key: "camera_center", folder: "Camera", label: "Center Position", widget: "position", min: -10, max: 10 },
-
-    // Rendering ─────────────────────────────────────────────────────────────
-    { key: "eps", folder: "Rendering", label: "EPS", widget: "slider", min: 0.0001, max: 0.01 },
-    { key: "wireframe", folder: "Rendering", label: "Wireframe", widget: "toggle" },
-    { key: "ev_correction", folder: "Rendering", label: "EV Correction", widget: "int-slider", min: -3, max: 3 },
-
-    // Scene ─────────────────────────────────────────────────────────────────
-    { key: "sky_color", folder: "Scene", label: "Sky Color", widget: "color" },
-];
-
-// ---------------------------------------------------------------------------
-// ConfigUI
-// ---------------------------------------------------------------------------
+type BindingContainer = Tweakpane.Pane | Tweakpane.FolderApi;
 
 export class ConfigUI {
-    private pane: Tweakpane.Pane;
-    private event_bus: EventBus;
-    private config_manager: ConfigManager;
-    private params: Record<string, ParamValue>;
+    private readonly pane: Tweakpane.Pane;
+    private readonly config_values: Record<string, ConfigValue>;
+    private readonly params: Record<string, ParamValue>;
+    private readonly on_change: (key: string) => void;
+    private readonly debounce_timers = new Map<string, number>();
 
-    constructor(config_manager: ConfigManager, event_bus: EventBus) {
-        this.config_manager = config_manager;
-        this.event_bus = event_bus;
-        this.pane = new Tweakpane.Pane({ title: "Config" });
-        this.params = this.buildParams();
-        this.setupInputs();
-        this.setupEventListeners();
+    public constructor(
+        container: HTMLElement,
+        config: SceneConfig,
+        on_change: (key: string) => void,
+    ) {
+        this.config_values = config.values as Record<string, ConfigValue>;
+        this.on_change = on_change;
+        this.pane = new Tweakpane.Pane({ title: "Config", container });
+        this.params = this.build_params(config.fields);
+        this.setup_inputs(config.fields);
     }
 
-    /** Build the params object that Tweakpane binds to, seeded from config. */
-    private buildParams(): Record<string, ParamValue> {
-        const config = this.config_manager.config as unknown as Record<string, unknown>;
-        const p: Record<string, ParamValue> = {};
-        for (const def of FIELD_DEFS) {
-            switch (def.widget) {
-                case "position": {
-                    const v = config[def.key] as vec3;
-                    p[def.key] = { x: v[0], y: v[1], z: v[2] };
-                    break;
-                }
-                case "color": {
-                    const v = config[def.key] as vec3;
-                    p[def.key] = { r: v[0], g: v[1], b: v[2] };
-                    break;
-                }
-                default:
-                    p[def.key] = config[def.key] as number | boolean;
-                    break;
+    private build_params(fields: readonly ConfigFieldDef[]): Record<string, ParamValue> {
+        const params: Record<string, ParamValue> = {};
+
+        for (const field of fields) {
+            const value = this.config_values[field.key];
+            if (value === undefined) {
+                throw new Error(`ConfigUI: config field "${field.key}" has no matching value`);
+            }
+
+            if (field.widget === "position") {
+                const position = value as vec3;
+                params[field.key] = { x: position[0], y: position[1], z: position[2] };
+            } else if (field.widget === "color") {
+                const color = value as vec3;
+                params[field.key] = { r: color[0], g: color[1], b: color[2] };
+            } else {
+                params[field.key] = value as number | boolean;
             }
         }
-        return p;
+
+        return params;
     }
 
-    /** Create Tweakpane folders and bindings from the field schema. */
-    private setupInputs() {
-        try {
-            const folderMap = new Map<string, Tweakpane.FolderApi>();
-            for (const def of FIELD_DEFS) {
-                let folder = folderMap.get(def.folder);
+    private setup_inputs(fields: readonly ConfigFieldDef[]): void {
+        const folders = new Map<string, Tweakpane.FolderApi>();
+
+        for (const field of fields) {
+            let container: BindingContainer = this.pane;
+            if (field.folder) {
+                let folder = folders.get(field.folder);
                 if (!folder) {
-                    folder = this.pane.addFolder({ title: def.folder });
-                    folderMap.set(def.folder, folder);
+                    folder = this.pane.addFolder({ title: field.folder });
+                    folders.set(field.folder, folder);
                 }
-                this.addBinding(folder, def);
+                container = folder;
             }
-        } catch (error) {
-            console.error("ConfigUI: Error setting up inputs:", error);
+
+            this.add_binding(container, field);
         }
     }
 
-    /** Create a single Tweakpane binding according to the widget type. */
-    private addBinding(folder: Tweakpane.FolderApi, def: FieldDef) {
-        switch (def.widget) {
+    private add_binding(container: BindingContainer, field: ConfigFieldDef): void {
+        const handle_change = () => this.handle_change(field);
+
+        switch (field.widget) {
             case "slider":
-                folder.addBinding(this.params, def.key, {
-                    min: def.min,
-                    max: def.max,
-                    step: def.step,
-                    label: def.label,
-                });
+                container.addBinding(this.params, field.key, {
+                    min: field.min,
+                    max: field.max,
+                    step: field.step,
+                    label: field.label,
+                }).on("change", handle_change);
                 break;
             case "int-slider":
-                folder.addBinding(this.params, def.key, {
-                    min: def.min,
-                    max: def.max,
-                    step: def.step ?? 1,
-                    label: def.label,
-                });
+                container.addBinding(this.params, field.key, {
+                    min: field.min,
+                    max: field.max,
+                    step: field.step ?? 1,
+                    label: field.label,
+                }).on("change", handle_change);
                 break;
             case "toggle":
-                folder.addBinding(this.params, def.key, { label: def.label });
+                container.addBinding(this.params, field.key, {
+                    label: field.label,
+                }).on("change", handle_change);
                 break;
             case "position":
-                folder.addBinding(this.params, def.key, {
-                    x: { min: def.min, max: def.max },
-                    y: { min: def.min, max: def.max },
-                    z: { min: def.min, max: def.max },
-                    label: def.label,
-                });
+                container.addBinding(this.params, field.key, {
+                    x: { min: field.min, max: field.max },
+                    y: { min: field.min, max: field.max },
+                    z: { min: field.min, max: field.max },
+                    label: field.label,
+                }).on("change", handle_change);
                 break;
             case "color":
-                folder.addBinding(this.params, def.key, {
+                container.addBinding(this.params, field.key, {
                     color: { type: "float" },
-                    label: def.label,
-                });
+                    label: field.label,
+                }).on("change", handle_change);
                 break;
         }
     }
 
-    /** Debounced change listener — writes params back to config and emits. */
-    private setupEventListeners() {
-        let debounceTimer: number | null = null;
+    private handle_change(field: ConfigFieldDef): void {
+        const value = this.params[field.key];
 
-        this.pane.on("change", () => {
-            this.updateConfigValues();
-
-            if (debounceTimer !== null) {
-                clearTimeout(debounceTimer);
-            }
-
-            debounceTimer = setTimeout(() => {
-                this.event_bus.emit("config-changed");
-                debounceTimer = null;
-            }, 50);
-        });
-    }
-
-    /** Copy every field from the Tweakpane params object back to Config. */
-    private updateConfigValues() {
-        const config = this.config_manager.config as unknown as Record<string, unknown>;
-        for (const def of FIELD_DEFS) {
-            const val = this.params[def.key] as ParamValue;
-            switch (def.widget) {
-                case "position": {
-                    const v = val as Vec3Params;
-                    config[def.key] = vec3.fromValues(v.x, v.y, v.z);
-                    break;
-                }
-                case "color": {
-                    const v = val as ColorParams;
-                    config[def.key] = vec3.fromValues(v.r, v.g, v.b);
-                    break;
-                }
-                default:
-                    config[def.key] = val;
-                    break;
-            }
+        if (field.widget === "position") {
+            const position = value as Vec3Params;
+            this.config_values[field.key] = vec3.fromValues(position.x, position.y, position.z);
+        } else if (field.widget === "color") {
+            const color = value as ColorParams;
+            this.config_values[field.key] = vec3.fromValues(color.r, color.g, color.b);
+        } else {
+            this.config_values[field.key] = value as number | boolean;
         }
+
+        const existing_timer = this.debounce_timers.get(field.key);
+        if (existing_timer !== undefined) {
+            window.clearTimeout(existing_timer);
+        }
+
+        const timer = window.setTimeout(() => {
+            this.debounce_timers.delete(field.key);
+            this.on_change(field.key);
+        }, 50);
+        this.debounce_timers.set(field.key, timer);
     }
 
-    public cleanup() {
+    public cleanup(): void {
+        for (const timer of this.debounce_timers.values()) {
+            window.clearTimeout(timer);
+        }
+        this.debounce_timers.clear();
         this.pane.dispose();
     }
 }

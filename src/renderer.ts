@@ -1,329 +1,208 @@
-import type { BindGroup } from "./bind_group";
-import { BindGroupBuilder } from "./bind_group_builder";
-import { ConfigManager } from "./config";
-
-import { get_shader_utils } from "./shaders/utils";
-import { get_shader_blit } from "./shaders/blit";
-
-import { ShaderReflector } from "./shader_reflector/shader_reflector";
-import { EventBus } from "./event_bus";
-import { create_gpu_uniform_buffer, create_gpu_uniform_buffer_f32 } from "./kernel_utils";
-
-import { vec3, mat4 } from "gl-matrix";
+import type { Scene, SceneFactory, SceneSize } from "./scenes/scene";
 
 export class Renderer {
-    private _config_manager: ConfigManager;
+    private device: GPUDevice | null = null;
+    private canvas_format: GPUTextureFormat | null = null;
+    private webgpu_init_promise: Promise<void> | null = null;
 
-    _event_bus!: EventBus;
+    private canvas: HTMLCanvasElement | null = null;
+    private canvas_context: GPUCanvasContext | null = null;
+    private active_scene: Scene | null = null;
+    private resize_observer: ResizeObserver | null = null;
 
-    _device!: GPUDevice;
-    _context!: GPUCanvasContext;
-    _presentation_format!: GPUTextureFormat;
-    _canvas_width!: number;
-    _canvas_height!: number;
+    private canvas_width = 1;
+    private canvas_height = 1;
+    private animation_frame_id: number | null = null;
+    private last_timestamp: number | null = null;
+    private time_seconds = 0;
+    private frame_index = 0;
+    private mount_id = 0;
 
-    _blit_pipeline!: GPURenderPipeline;
-    _blit_bind_group!: BindGroup;
+    public async mount(canvas: HTMLCanvasElement, create_scene: SceneFactory): Promise<Scene | null> {
+        this.stop_active_scene();
+        const current_mount_id = ++this.mount_id;
 
-    _utils_shader_reflector!: ShaderReflector;
-
-    constructor(config_manager: ConfigManager) {
-        this._config_manager = config_manager;
-    }
-
-    public async main() {
         await this.init_webgpu();
-        this.init_canvas_size();
-        if (await this.pre_init()) {
-            this.init_kernels();
-            await this.init_bind_groups();
-            this.init_callbacks();
-            this.render();
+        if (current_mount_id !== this.mount_id) {
+            return null;
         }
+
+        if (!this.device || !this.canvas_format) {
+            throw new Error("WebGPU initialization completed without a device or canvas format.");
+        }
+
+        const canvas_context = canvas.getContext("webgpu");
+        if (!canvas_context) {
+            throw new Error("Failed to create a WebGPU canvas context.");
+        }
+
+        canvas_context.configure({
+            device: this.device,
+            format: this.canvas_format,
+            alphaMode: "opaque",
+        });
+
+        this.canvas = canvas;
+        this.canvas_context = canvas_context;
+        this.update_canvas_size(false);
+
+        const scene = create_scene({
+            device: this.device,
+            canvas_format: this.canvas_format,
+        });
+
+        try {
+            await scene.init(this.current_size());
+        } catch (error) {
+            scene.destroy();
+            throw error;
+        }
+
+        if (current_mount_id !== this.mount_id) {
+            scene.destroy();
+            return null;
+        }
+
+        this.active_scene = scene;
+        this.resize_observer = new ResizeObserver(() => this.update_canvas_size(true));
+        this.resize_observer.observe(canvas);
+        this.update_canvas_size(true);
+        this.start_render_loop();
+
+        return scene;
     }
 
-    public async init_webgpu() {
-        const adapter = await navigator.gpu.requestAdapter();
-        if (adapter === null) {
-            throw new Error("Failed to request WebGPU adapter. Your browser may not support WebGPU.");
-        }
+    public unmount(): void {
+        this.mount_id++;
+        this.stop_active_scene();
+    }
 
-        const device = await adapter.requestDevice({
-            requiredLimits: {
-                maxBufferSize: adapter.limits.maxBufferSize,
-                maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-                maxComputeInvocationsPerWorkgroup: adapter.limits.maxComputeInvocationsPerWorkgroup,
-                maxComputeWorkgroupSizeX: adapter.limits.maxComputeWorkgroupSizeX,
-                maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage
-            },
-            requiredFeatures: ["subgroups"] as const,
-        });
-        if (device === null) {
-            throw new Error("Failed to request WebGPU device.");
-        }
-
-        // Catch uncaptured WebGPU errors and convert to thrown errors
-        device.addEventListener('uncapturederror', (event) => {
-            throw new Error(`WebGPU Error: ${event.error.message}`);
-        });
-
-        this._device = device;
-
-        this._presentation_format = navigator.gpu.getPreferredCanvasFormat();
-
-        const canvas = document.querySelector("canvas");
-        if (canvas === null) {
-            throw new Error("could not find canvas element. please check index.html!");
-        }
-
-        const context = canvas.getContext("webgpu");
-        if (context === null) {
-            console.error("failed to initialize WebGPU!");
+    private async init_webgpu(): Promise<void> {
+        if (this.device && this.canvas_format) {
             return;
         }
 
-        context.configure({// srgb?? gamma correction??
-            device: this._device,
-            format: this._presentation_format,
-        });
-        this._context = context;
-
-        console.info("WebGPU initialized successfully 😘");
-    }
-
-    public async pre_init(): Promise<boolean> {
-        this._utils_shader_reflector = new ShaderReflector(get_shader_utils(this._config_manager.config));
-        this._event_bus = new EventBus();
-
-        return true;
-    }
-
-    public prepare_scene_info_data(): ArrayBuffer {
-        // ========
-        //  camera
-        // ========
-        // let camera_gaze_norm = normalize(camera_info.center - camera_info.eye);
-        // let camera_right_norm = normalize(cross(camera_gaze_norm, vec3f(0.0, 1.0, 0.0)));
-        // let camera_down_norm = cross(camera_gaze_norm, camera_right_norm);
-
-        const config = this._config_manager.config;
-
-        const camera_gaze_norm = vec3.create(); // F
-        vec3.sub(camera_gaze_norm, config.camera_center, config.camera_eye);
-        vec3.normalize(camera_gaze_norm, camera_gaze_norm);
-
-        const camera_right_norm = vec3.create(); // R
-        vec3.cross(camera_right_norm, camera_gaze_norm, vec3.fromValues(0.0, 1.0, 0.0));
-        vec3.normalize(camera_right_norm, camera_right_norm);
-
-        const camera_down_norm = vec3.create(); // D
-        vec3.cross(camera_down_norm, camera_gaze_norm, camera_right_norm);
-
-        const fy = this._canvas_height / (2.0 * Math.tan(config.camera_fov_y / 2.0));
-        const fx = fy;
-        const cx = this._canvas_width / 2.0;
-        const cy = this._canvas_height / 2.0;
-        const intrinsics = mat4.fromValues(
-            fx, 0.0, 0.0, 0.0,
-            0.0, fy, 0.0, 0.0,
-            cx, cy, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
-        );
-        const inv_intrinsics = mat4.create();
-        mat4.invert(inv_intrinsics, intrinsics);
-
-        const c2w = mat4.fromValues(
-            camera_right_norm[0], camera_right_norm[1], camera_right_norm[2], 0.0,
-            camera_down_norm[0], camera_down_norm[1], camera_down_norm[2], 0.0,
-            camera_gaze_norm[0], camera_gaze_norm[1], camera_gaze_norm[2], 0.0,
-            config.camera_eye[0], config.camera_eye[1], config.camera_eye[2], 1.0,
-        );
-        const w2c = mat4.create();
-        mat4.invert(w2c, c2w);
-
-
-        // =================
-        //  fill scene info
-        // =================
-        // see `struct SceneInfo` in `utils.wgsl`
-
-        const scene_info_struct = this._utils_shader_reflector.get_struct("SceneInfo");
-        scene_info_struct
-            .set_field("intrinsics", intrinsics)
-            .set_field("extrinsics", w2c)
-            .set_field("inv_intrinsics", inv_intrinsics)
-            .set_field("inv_extrinsics", c2w)
-            .set_field("width", this._canvas_width)
-            .set_field("height", this._canvas_height)
-            .set_field("eye", config.camera_eye);
-
-        return scene_info_struct.data;
-    }
-
-    public init_canvas_size() {
-        const canvas = document.querySelector("canvas");
-        if (canvas === null) {
-            throw new Error("could not find canvas element. please check index.html!");
+        if (this.webgpu_init_promise) {
+            await this.webgpu_init_promise;
+            return;
         }
 
-        const dpr = window.devicePixelRatio;
-        canvas.width = Math.floor(dpr * canvas.clientWidth);
-        canvas.height = Math.floor(dpr * canvas.clientHeight);
-        this._canvas_width = canvas.width;
-        this._canvas_height = canvas.height;
+        this.webgpu_init_promise = this.create_webgpu_device();
+        try {
+            await this.webgpu_init_promise;
+        } finally {
+            this.webgpu_init_promise = null;
+        }
     }
 
-    public init_kernels() {
-        const config = this._config_manager.config;
-        const shader_utils = get_shader_utils(config);
+    private async create_webgpu_device(): Promise<void> {
 
-        // =========
-        //  kernels
-        // =========
-        const blit_bind_group_layout = this._device.createBindGroupLayout({
-            entries: [
-                {
-                    binding: 0,
-                    visibility: GPUShaderStage.FRAGMENT,
-                    buffer: {
-                        type: "uniform"
-                    }
-                },
-                {
-                    binding: 1,
-                    visibility: GPUShaderStage.FRAGMENT,
-                    buffer: {
-                        type: "uniform"
-                    }
-                },
-            ]
+        if (!navigator.gpu) {
+            throw new Error("WebGPU is not supported by this browser.");
+        }
+
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+            throw new Error("Failed to request a WebGPU adapter.");
+        }
+
+        const device = await adapter.requestDevice();
+        device.addEventListener("uncapturederror", (event) => {
+            throw new Error(`WebGPU Error: ${event.error.message}`);
         });
-        const blit_pipeline_layout = this._device.createPipelineLayout({
-            bindGroupLayouts: [blit_bind_group_layout]
-        });
-        this._blit_pipeline = this._device.createRenderPipeline({
-            label: "blit pipeline",
-            layout: blit_pipeline_layout,
-            vertex: {
-                module: this._device.createShaderModule({
-                    code: shader_utils + get_shader_blit(config),
-                }),
-                entryPoint: "vertex"
-            },
-            fragment: {
-                module: this._device.createShaderModule({
-                    code: shader_utils + get_shader_blit(config),
-                }),
-                entryPoint: "fragment",
-                targets: [
-                    {
-                        format: this._presentation_format,
-                        writeMask: GPUColorWrite.ALL
-                    }
-                ]
-            },
-            primitive: {
-                topology: "triangle-strip"
-            },
-        });
+
+        this.device = device;
+        this.canvas_format = navigator.gpu.getPreferredCanvasFormat();
     }
 
-    public async init_bind_groups() {
-        const scene_info_data = this.prepare_scene_info_data();
-        const scene_info_buffer = create_gpu_uniform_buffer(this._device, "scene info", scene_info_data.byteLength);
-        this._device.queue.writeBuffer(scene_info_buffer, 0, scene_info_data);
+    private update_canvas_size(notify_scene: boolean): void {
+        if (!this.canvas) {
+            return;
+        }
 
-        const time_buffer = create_gpu_uniform_buffer_f32(this._device, "time", 0.0);
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.max(1, Math.floor(this.canvas.clientWidth * dpr));
+        const height = Math.max(1, Math.floor(this.canvas.clientHeight * dpr));
 
-        this._blit_bind_group = new BindGroupBuilder(this._device, "blit bind group")
-            .add_buffer("in_scene_info", 0, scene_info_buffer)
-            .add_buffer("in_time", 1, time_buffer)
-            .build_raw(this._blit_pipeline);
+        if (width === this.canvas_width && height === this.canvas_height) {
+            return;
+        }
+
+        this.canvas.width = width;
+        this.canvas.height = height;
+        this.canvas_width = width;
+        this.canvas_height = height;
+
+        if (notify_scene) {
+            this.active_scene?.resize(this.current_size());
+        }
     }
 
-    public init_callbacks() {
-        this._event_bus.listen("canvas-size-changed", () => {
-            this.init_canvas_size();
-            this.init_bind_groups();
-        });
-
-        this._event_bus.listen("config-changed", () => {
-            this.init_kernels();
-            this.init_bind_groups();
-        });
-
-        let resize_callback: number;
-        addEventListener("resize", () => {
-            if (resize_callback) {
-                clearTimeout(resize_callback);
-            }
-            resize_callback = setTimeout(() => {
-                // Wait for the browser to complete layout updates before reading canvas size
-                requestAnimationFrame(() => {
-                    this._event_bus.emit("canvas-size-changed");
-                });
-            }, 100);
-        });
-    }
-
-    public get_event_bus(): EventBus {
-        return this._event_bus;
-    }
-
-    public render() {
-        let last_timestamp: DOMHighResTimeStamp | null = null;
-        let time_acc = 0.0;
-
-        const _render = async (time: DOMHighResTimeStamp) => {
-            window.requestAnimationFrame(_render);
-
-            this._event_bus.process();
-
-            if (last_timestamp === null) {
-                last_timestamp = time;
-            }
-            const delta_time = time - last_timestamp;
-            last_timestamp = time;
-            time_acc += delta_time;
-
-            const buffer = new Float32Array(1);
-            buffer[0] = time_acc;
-            this._device.queue.writeBuffer(this._blit_bind_group.get_buffer("in_time"), 0, buffer.buffer);
-
-            const config = this._config_manager.config;
-
-            const command_encoder = this._device.createCommandEncoder();
-            {
-                command_encoder.pushDebugGroup("frame");
-                {
-                    command_encoder.pushDebugGroup("blit");
-                    {
-                        const sky_color = config.sky_color;
-                        const blit_render_pass = command_encoder.beginRenderPass({
-                            colorAttachments: [
-                                {
-                                    view: this._context.getCurrentTexture().createView(),
-                                    clearValue: { r: sky_color[0], g: sky_color[1], b: sky_color[2], a: 1 },
-                                    loadOp: "clear",
-                                    storeOp: "store",
-                                },
-                            ],
-                        });
-                        blit_render_pass.setBindGroup(0, this._blit_bind_group.bind_group_object);
-                        blit_render_pass.setPipeline(this._blit_pipeline);
-                        blit_render_pass.draw(4, 1);
-                        blit_render_pass.end();
-
-                        command_encoder.popDebugGroup();
-                    }
-
-                    command_encoder.popDebugGroup();
-                }
-
-                this._device.queue.submit([command_encoder.finish()]);
-            }
+    private current_size(): SceneSize {
+        return {
+            width: this.canvas_width,
+            height: this.canvas_height,
         };
+    }
 
-        window.requestAnimationFrame(_render);
+    private start_render_loop(): void {
+        this.last_timestamp = null;
+        this.time_seconds = 0;
+        this.frame_index = 0;
+        this.animation_frame_id = window.requestAnimationFrame((timestamp) => {
+            this.render_frame(timestamp);
+        });
+    }
+
+    private render_frame(timestamp: DOMHighResTimeStamp): void {
+        this.animation_frame_id = null;
+
+        if (!this.device || !this.canvas_context || !this.active_scene) {
+            return;
+        }
+
+        const delta_seconds = this.last_timestamp === null
+            ? 0
+            : (timestamp - this.last_timestamp) / 1000;
+        this.last_timestamp = timestamp;
+        this.time_seconds += delta_seconds;
+
+        const encoder = this.device.createCommandEncoder({ label: "scene frame" });
+        const output_view = this.canvas_context.getCurrentTexture().createView();
+
+        this.active_scene.render({
+            encoder,
+            output_view,
+            width: this.canvas_width,
+            height: this.canvas_height,
+            time_seconds: this.time_seconds,
+            delta_seconds,
+            frame_index: this.frame_index,
+        });
+
+        this.device.queue.submit([encoder.finish()]);
+        this.frame_index++;
+        this.animation_frame_id = window.requestAnimationFrame((next_timestamp) => {
+            this.render_frame(next_timestamp);
+        });
+    }
+
+    private stop_active_scene(): void {
+        if (this.animation_frame_id !== null) {
+            window.cancelAnimationFrame(this.animation_frame_id);
+            this.animation_frame_id = null;
+        }
+
+        this.resize_observer?.disconnect();
+        this.resize_observer = null;
+
+        const scene = this.active_scene;
+        this.active_scene = null;
+        scene?.destroy();
+
+        this.canvas_context?.unconfigure();
+        this.canvas_context = null;
+        this.canvas = null;
+        this.last_timestamp = null;
     }
 }
